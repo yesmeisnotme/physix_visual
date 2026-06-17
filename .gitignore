@@ -15,6 +15,9 @@ viewer/.cache/
 Thumbs.db
 .vscode/
 
+# Local game data (do not commit)
+collision.bin
+
 # Local debug / scratch
 err.txt
 out.txt

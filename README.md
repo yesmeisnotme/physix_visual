@@ -101,7 +101,7 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 - `PxFoundationPROFILE_x64.dll`
 - `PxPvdSDKPROFILE_x64.dll`
 
-## 样本数据统计（collision.bin）
+## 样本数据统计（开发时参考）
 
 | 类型 | 数量 |
 |------|------|
@@ -111,7 +111,7 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 | HeightField | 1 |
 | Material | 1（集合内） |
 
-坐标单位：**1 unit = 1 cm**（游戏客户端 UE Z-up）。
+坐标单位：**1 unit = 1 cm**（游戏客户端 UE Z-up）。请自备 `collision.bin` 放项目根或通过 Viewer 打开。
 
 ## 项目结构
 
@@ -119,7 +119,7 @@ cmd /c "call `"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliar
 physix_visual/
 ├── 打开碰撞可视化.bat      # 双击启动（中文名）
 ├── Open-Viewer.bat          # 双击启动（英文名，等价）
-├── collision.bin          # 样本数据（可选，放项目根即可自动加载）
+├── collision.bin          # 本地放置（gitignore，不提交仓库）
 ├── converter/             # C++ 转换器 physix_convert
 ├── viewer/                # Three.js Web Viewer + 转换 API
 │   └── .cache/            # 转换缓存（gitignore）
