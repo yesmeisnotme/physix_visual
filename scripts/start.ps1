@@ -10,6 +10,8 @@ $Converter = Join-Path $Root "converter\build\physix_convert.exe"
 $Viewer = Join-Path $Root "viewer"
 $Port = 5173
 
+. (Join-Path $PSScriptRoot "bootstrap.ps1") -Root $Root.Path
+
 function Test-ServerReady([int]$PortNumber) {
     try {
         Invoke-WebRequest -Uri "http://127.0.0.1:$PortNumber/api/status" -UseBasicParsing -TimeoutSec 2 | Out-Null
@@ -36,18 +38,7 @@ Write-Host ""
 Write-Host "PhysX Collision Visualizer" -ForegroundColor Cyan
 Write-Host ""
 
-if (-not (Test-Path $Converter)) {
-    Write-Host "[1/4] Building converter..." -ForegroundColor Yellow
-    Push-Location (Join-Path $Root "converter")
-    cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release | Out-Host
-    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "cmake configure failed" }
-    cmake --build build | Out-Host
-    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "cmake build failed" }
-    Pop-Location
-    if (-not (Test-Path $Converter)) {
-        throw "Converter not found. Run: cd converter; cmake -B build -G Ninja; cmake --build build"
-    }
-}
+$node = Invoke-Bootstrap
 
 $InputPath = ""
 $Url = "http://127.0.0.1:$Port/"
@@ -86,64 +77,57 @@ if ($InputPath -ne "") {
 
 Push-Location $Viewer
 $server = $null
+$prevPath = $env:PATH
+$env:PATH = "$($node.NodeDir);$prevPath"
 
-if (-not (Test-Path "node_modules")) {
-    Write-Host "[3/4] Installing viewer dependencies (npm install)..." -ForegroundColor Yellow
-    npm install
-    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "npm install failed" }
-}
-
-if (Test-ServerReady $Port) {
-    Write-Host "[3/4] Dev server already running on port $Port" -ForegroundColor Gray
-} else {
-    Write-Host "[3/4] Starting dev server on port $Port..." -ForegroundColor Yellow
-    Stop-PortListener $Port
-    Start-Sleep -Milliseconds 300
-    $server = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "dev" -WorkingDirectory $Viewer -PassThru -NoNewWindow
-    $ready = $false
-    for ($i = 0; $i -lt 60; $i++) {
-        if (Test-ServerReady $Port) {
-            $ready = $true
-            break
+try {
+    if (Test-ServerReady $Port) {
+        Write-Host "[3/4] Dev server already running on port $Port" -ForegroundColor Gray
+    } else {
+        Write-Host "[3/4] Starting dev server on port $Port..." -ForegroundColor Yellow
+        Stop-PortListener $Port
+        Start-Sleep -Milliseconds 300
+        $server = Start-Process -FilePath $node.NpmCmd -ArgumentList "run", "dev" -WorkingDirectory $Viewer -PassThru -NoNewWindow
+        $ready = $false
+        for ($i = 0; $i -lt 60; $i++) {
+            if (Test-ServerReady $Port) {
+                $ready = $true
+                break
+            }
+            if ($server.HasExited) {
+                throw "Dev server exited unexpectedly. Check runtime\node or run: .\scripts\bootstrap.ps1"
+            }
+            Start-Sleep -Seconds 1
         }
-        if ($server.HasExited) {
-            Pop-Location
-            throw "Dev server exited unexpectedly. Check Node.js and run: cd viewer; npm run dev"
+        if (-not $ready) {
+            if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+            throw "Dev server did not start within 60s."
         }
-        Start-Sleep -Seconds 1
     }
-    if (-not $ready) {
-        if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
-        Pop-Location
-        throw "Dev server did not start within 60s. Check Node.js is installed."
+
+    Write-Host "[4/4] Ready" -ForegroundColor Green
+    if ($InputPath -ne "") {
+        Write-Host "  Source : $InputPath"
     }
-}
+    Write-Host "  Viewer : $Url"
+    Write-Host "  Note   : load map / set guide & pivot in the browser UI"
+    Write-Host ""
 
-$Url = "http://127.0.0.1:$Port/?bin=$UrlBin"
+    if (-not $NoBrowser) {
+        Start-Process $Url
+    }
 
-Write-Host "[4/4] Ready" -ForegroundColor Green
-if ($InputPath -ne "") {
-    Write-Host "  Source : $InputPath"
-}
-Write-Host "  Viewer : $Url"
-Write-Host "  Note   : load map / set guide & pivot in the browser UI"
-Write-Host ""
+    if (-not (Test-ServerReady $Port)) {
+        throw "Server is not responding"
+    }
 
-if (-not $NoBrowser) {
-    Start-Process $Url
-}
-
-if (-not (Test-ServerReady $Port)) {
+    if ($server -and -not $server.HasExited) {
+        Wait-Process -Id $server.Id
+    } else {
+        Write-Host "Server is running in another process. Close that window to stop."
+        Read-Host "Press Enter to exit"
+    }
+} finally {
+    $env:PATH = $prevPath
     Pop-Location
-    throw "Server is not responding"
 }
-
-# Keep this window attached to vite output if we started the server here
-if ($server -and -not $server.HasExited) {
-    Wait-Process -Id $server.Id
-} else {
-    Write-Host "Server is running in another process. Close that window to stop."
-    Read-Host "Press Enter to exit"
-}
-
-Pop-Location

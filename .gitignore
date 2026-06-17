@@ -1,6 +1,11 @@
 # PhysX SDK source (clone locally, do not commit)
 third_party/PhysX-3.4/
 
+# Portable runtime (auto-downloaded; copy with folder for offline use)
+runtime/node/
+runtime/downloads/
+runtime/vcredist/vc_redist.x64.exe
+
 # Build outputs
 converter/build/
 viewer/node_modules/

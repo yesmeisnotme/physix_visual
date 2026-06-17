@@ -4,10 +4,38 @@
 
 ## 环境要求
 
-- Windows x64
+### 日常使用（拷贝整个目录到其他 Win10+ 电脑）
+
+**双击 `打开碰撞可视化.bat` 即可。** 首次启动会自动：
+
+1. 使用 `runtime/node/` 内嵌 Node（若无则自动下载到该目录）
+2. 检查 `converter/build/` 转换器与 DLL；若缺 VC++ 运行库会尝试安装
+3. 若缺少 `viewer/node_modules` 则自动 `npm install`（需网络）
+
+**拷贝到其他电脑前建议在本机先运行一次：**
+
+```powershell
+.\scripts\prepare-portable.ps1
+```
+
+然后连同以下目录一起复制（可离线使用）：
+
+| 目录 | 说明 |
+|------|------|
+| `converter/build/` | `physix_convert.exe` + 全部 PhysX DLL |
+| `viewer/node_modules/` | Viewer 依赖 |
+| `runtime/node/` | 便携 Node.js（`prepare-portable` 会下载） |
+| `runtime/vcredist/` | 可选，VC++ 安装包缓存 |
+
+**不必复制：** `third_party/PhysX-3.4/`（仅编译转换器时需要）、`.git`
+
+目标机仍需：**Windows 10+ x64**、浏览器；VC++ 运行库若缺失会尝试自动安装（可能需要管理员确认）。
+
+### 从源码开发 / 编译转换器
+
 - Visual Studio 2017+（含 C++ 桌面开发）
 - CMake 3.16+
-- Node.js 18+
+- Node.js 18+（若已有 `runtime/node` 可不用系统 Node）
 
 ## 一键打开（推荐）
 
@@ -123,7 +151,10 @@ physix_visual/
 ├── converter/             # C++ 转换器 physix_convert
 ├── viewer/                # Three.js Web Viewer + 转换 API
 │   └── .cache/            # 转换缓存（gitignore）
-├── scripts/start.ps1      # 启动脚本
+├── scripts/start.ps1      # 启动（含依赖检测）
+├── scripts/bootstrap.ps1  # Node / VC++ / npm 自动准备
+├── scripts/prepare-portable.ps1  # 拷贝前一键准备离线包
+├── runtime/               # 便携 Node、VC++ 安装包缓存（可随目录复制）
 └── docs/方案设计.md
 ```
 
