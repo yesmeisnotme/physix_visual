@@ -48,9 +48,9 @@ export function applyDisplayModeToMesh(
     for (const raw of mats) {
       const mat = raw as THREE.MeshStandardMaterial;
       mat.wireframe = false;
-      mat.transparent = true;
-      mat.opacity = 0.78;
-      mat.depthWrite = false;
+      mat.transparent = false;
+      mat.opacity = 1;
+      mat.depthWrite = true;
       mat.visible = true;
     }
     if (outline) outline.visible = false;

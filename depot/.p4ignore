@@ -1,0 +1,33 @@
+# Perforce ignore for Tools/PhysxVisual (portable bundle)
+# Enable: p4 ignore (uses nearest .p4ignore) or set P4IGNORE=.p4ignore
+# Verify:  p4 ignore -v -i collision.bin
+
+# --- Never submit: game / local data ---
+collision.bin
+navmesh.bin
+
+# --- Runtime caches (regenerated on use) ---
+viewer/.cache/...
+viewer/dist/...
+runtime/downloads/...
+runtime/vcredist/vc_redist.x64.exe
+
+# --- Vite dev cache ---
+viewer/node_modules/.vite/...
+
+# --- Local scratch / debug ---
+err.txt
+out.txt
+stats_err.txt
+stats_out.txt
+
+# --- Exported glTF (conversion output) ---
+*.gltf
+*.glb
+*.gltf.bin
+
+# --- OS / editor ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/...

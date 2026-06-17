@@ -53,9 +53,9 @@ function applyMeshTypeColor(mesh: THREE.Mesh, shapeType: string) {
     mat.emissive.setHex(0x000000);
     mat.metalness = 0;
     mat.roughness = 0.82;
-    mat.transparent = true;
-    mat.opacity = 0.78;
-    mat.depthWrite = false;
+    mat.transparent = false;
+    mat.opacity = 1;
+    mat.depthWrite = true;
     mat.side = THREE.DoubleSide;
     mat.needsUpdate = true;
   }
