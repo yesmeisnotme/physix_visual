@@ -1,0 +1,23 @@
+# PhysX SDK source (clone locally, do not commit)
+third_party/PhysX-3.4/
+
+# Build outputs
+converter/build/
+viewer/node_modules/
+viewer/dist/
+viewer/.cache/
+*.gltf
+*.glb
+*.gltf.bin
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Local debug / scratch
+err.txt
+out.txt
+stats_err.txt
+stats_out.txt
+navmesh.bin

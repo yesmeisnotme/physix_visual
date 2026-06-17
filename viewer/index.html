@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PhysX Collision Viewer</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="canvas"></canvas>
+      <div id="loading" class="loading hidden">
+        <div class="loading-card">
+          <div class="spinner"></div>
+          <p id="loading-text">正在转换 collision.bin…</p>
+        </div>
+      </div>
+      <div id="sidebar">
+        <h1>PhysX Collision</h1>
+        <p class="hint">打开 Viewer 后加载 collision.bin，再在侧栏设置辅助线 / 视角中心</p>
+        <div class="panel actions">
+          <button id="open-btn" type="button">打开 collision.bin</button>
+          <input id="file-input" type="file" accept=".bin" hidden />
+        </div>
+        <div id="stats" class="panel"></div>
+        <div id="selection" class="panel hidden"></div>
+        <div class="panel">
+          <h2>显示模式</h2>
+          <p class="field-hint">加载地图后切换，无需提前设置</p>
+          <label class="check-row"><input type="radio" name="display-mode" value="surface" checked /> 半透明面</label>
+          <label class="check-row"><input type="radio" name="display-mode" value="dashed" /> 虚线框</label>
+        </div>
+        <div class="panel">
+          <h2>类型过滤</h2>
+          <div id="type-filters"></div>
+        </div>
+        <div class="panel">
+          <label><input type="checkbox" id="show-triggers" /> 显示 Trigger</label>
+        </div>
+        <div class="panel">
+          <h2>辅助线</h2>
+          <p class="field-hint">加载地图后，输入或点击场景拾取 UE 坐标 X、Y</p>
+          <div class="field-row">
+            <label class="field"><span>X</span><input type="number" id="guide-x" step="any" placeholder="cm" /></label>
+            <label class="field"><span>Y</span><input type="number" id="guide-y" step="any" placeholder="cm" /></label>
+          </div>
+          <div class="btn-row">
+            <button id="guide-apply" type="button" class="btn-secondary">应用</button>
+            <button id="guide-pick" type="button" class="btn-secondary">场景中拾取</button>
+          </div>
+          <label class="check-row"><input type="checkbox" id="guide-show" /> 显示竖线</label>
+        </div>
+        <div class="panel">
+          <h2>两点连线</h2>
+          <p class="field-hint">UE 坐标 Pos A / Pos B，显示连接线段</p>
+          <p class="field-label">Pos A</p>
+          <div class="field-row triple">
+            <label class="field"><span>X</span><input type="number" id="seg-ax" step="any" placeholder="cm" /></label>
+            <label class="field"><span>Y</span><input type="number" id="seg-ay" step="any" placeholder="cm" /></label>
+            <label class="field"><span>Z</span><input type="number" id="seg-az" step="any" placeholder="cm" /></label>
+          </div>
+          <div class="btn-row">
+            <button id="seg-pick-a" type="button" class="btn-secondary">拾取 A</button>
+          </div>
+          <p class="field-label">Pos B</p>
+          <div class="field-row triple">
+            <label class="field"><span>X</span><input type="number" id="seg-bx" step="any" placeholder="cm" /></label>
+            <label class="field"><span>Y</span><input type="number" id="seg-by" step="any" placeholder="cm" /></label>
+            <label class="field"><span>Z</span><input type="number" id="seg-bz" step="any" placeholder="cm" /></label>
+          </div>
+          <div class="btn-row">
+            <button id="seg-pick-b" type="button" class="btn-secondary">拾取 B</button>
+            <button id="seg-apply" type="button" class="btn-secondary">应用</button>
+          </div>
+          <label class="check-row"><input type="checkbox" id="seg-show" /> 显示连线</label>
+          <button id="seg-clear" type="button" class="btn-secondary btn-block">清除</button>
+          <div id="seg-info" class="pivot-info">—</div>
+        </div>
+        <div class="panel">
+          <h2>视角中心</h2>
+          <p class="field-hint">加载地图后，输入或点击场景拾取 UE 坐标，滚轮缩放绕此点</p>
+          <div class="field-row triple">
+            <label class="field"><span>X</span><input type="number" id="pivot-x" step="any" placeholder="cm" /></label>
+            <label class="field"><span>Y</span><input type="number" id="pivot-y" step="any" placeholder="cm" /></label>
+            <label class="field"><span>Z</span><input type="number" id="pivot-z" step="any" placeholder="cm" /></label>
+          </div>
+          <div class="btn-row">
+            <button id="pivot-apply" type="button">设为中心</button>
+            <button id="pivot-pick" type="button" class="btn-secondary">场景中拾取</button>
+          </div>
+          <button id="pivot-clear" type="button" class="btn-secondary btn-block">清除中心</button>
+          <div id="pivot-info" class="pivot-info">当前中心：—</div>
+          <p class="field-hint">红色十字为视角中心标记，非碰撞体</p>
+        </div>
+        <div id="source" class="source panel hidden"></div>
+        <p class="keys">F 聚焦 · R 重置 · 左键 orbit · 右键 pan · 滚轮绕中心缩放 · Esc 取消拾取</p>
+        <div id="pick-hint" class="pick-hint hidden"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
