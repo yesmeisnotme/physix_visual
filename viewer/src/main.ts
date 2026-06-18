@@ -2,7 +2,8 @@ import './style.css';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { formatUe, parseNumInput, ueToViewer, viewerToUe } from './coords';
+import { formatUe, parseNumInput } from './coords';
+import { SceneOrigin } from './scene-origin';
 import {
   type DisplayMode,
   applyDisplayModeToMesh,
@@ -56,6 +57,9 @@ function applyMeshTypeColor(mesh: THREE.Mesh, shapeType: string) {
     mat.transparent = false;
     mat.opacity = 1;
     mat.depthWrite = true;
+    mat.polygonOffset = true;
+    mat.polygonOffsetFactor = 1;
+    mat.polygonOffsetUnits = 1;
     mat.side = THREE.DoubleSide;
     mat.needsUpdate = true;
   }
@@ -116,23 +120,105 @@ const segInfoEl = document.getElementById('seg-info')!;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1d24);
 
-const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 10, 500000);
-const initialCameraPos = new THREE.Vector3(80000, 60000, 80000);
-camera.position.copy(initialCameraPos);
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.5, 500000);
+const initialCameraDistance = 120000;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.sortObjects = true;
 
+const sceneOrigin = new SceneOrigin();
+
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = false;
+controls.enableZoom = false;
+controls.minDistance = 1;
 controls.target.set(0, 0, 0);
 controls.update();
 
+/** Scene extent (cm); used for clip planes and control sensitivity. */
+let sceneMaxDim = 500000;
+
+const contentRoot = new THREE.Group();
+contentRoot.name = 'content_root';
+scene.add(contentRoot);
+
+function bakeSceneOrigin(center: THREE.Vector3) {
+  const meshes = meshEntries.map((e) => e.mesh);
+  sceneOrigin.bakeMeshesAtLoad(meshes, center);
+  contentRoot.updateMatrixWorld(true);
+}
+
+function tryFloatingOriginRebase() {
+  if (
+    sceneOrigin.rebaseIfNeeded(
+      camera,
+      controls.target,
+      meshEntries.map((e) => e.mesh),
+      sceneMaxDim,
+    )
+  ) {
+    rebuildGuideLine();
+    rebuildSegmentLine();
+    updateCameraClippingPlanes();
+    updateControlSensitivity();
+    if (customPivotActive) updatePivotCross();
+    updateGridPlacement();
+  }
+}
+
+function localToUe(v: THREE.Vector3): THREE.Vector3 {
+  return sceneOrigin.localToUe(v);
+}
+
+function ueToLocal(x: number, y: number, z: number): THREE.Vector3 {
+  return sceneOrigin.ueToLocal(x, y, z);
+}
+
+const wheelDolly = new THREE.Vector3();
+
+/** Multiplicative wheel dolly — works at any distance (no huge additive step). */
+function applyWheelZoom(deltaY: number) {
+  const dist = wheelDolly.subVectors(camera.position, controls.target).length();
+  if (dist < 1e-6) return;
+  const inward = deltaY < 0;
+  const factor = inward ? 0.82 : 1.18;
+  const newDist = THREE.MathUtils.clamp(dist * factor, controls.minDistance, controls.maxDistance);
+  wheelDolly.subVectors(camera.position, controls.target).setLength(newDist).add(controls.target);
+  camera.position.copy(wheelDolly);
+  controls.update();
+  tryFloatingOriginRebase();
+  updateCameraClippingPlanes();
+  updateControlSensitivity();
+  updateGridVisibility();
+}
+
+function updateCameraClippingPlanes() {
+  const distance = camera.position.distanceTo(controls.target);
+  const d = Math.max(distance, 1);
+  const extent = Math.max(sceneMaxDim, 1000);
+  camera.near = Math.max(0.5, d / 2000);
+  camera.far = Math.max(extent * 4, d * 50, 20000);
+  camera.updateProjectionMatrix();
+}
+
+/** Pan must stay usable when camera is close; OrbitControls default scales too small. */
+function updateControlSensitivity() {
+  const distance = camera.position.distanceTo(controls.target);
+  const ref = Math.max(sceneMaxDim * 0.08, 800);
+  const boost = THREE.MathUtils.clamp(ref / Math.max(distance, 5), 2, 80);
+  controls.panSpeed = boost;
+}
+
+function placeCameraAroundTarget(dist: number) {
+  camera.position.set(dist * 0.62, dist * 0.48, dist * 0.62);
+}
+placeCameraAroundTarget(initialCameraDistance);
+
 const overlays = new THREE.Group();
 overlays.name = 'overlays';
-scene.add(overlays);
+contentRoot.add(overlays);
 
 const guideGroup = new THREE.Group();
 guideGroup.name = 'guide_lines';
@@ -164,22 +250,62 @@ interface UePos {
 let segmentA: UePos | null = null;
 let segmentB: UePos | null = null;
 
-const grid = new THREE.GridHelper(200000, 200, 0x444444, 0x2a2a2a);
-grid.position.y = 0;
-scene.add(grid);
+let gridHelper: THREE.GridHelper | null = null;
 
 const axes = new THREE.AxesHelper(5000);
-scene.add(axes);
+axes.name = 'axes_helper';
+contentRoot.add(axes);
+
+function rebuildGroundGrid() {
+  if (gridHelper) {
+    contentRoot.remove(gridHelper);
+    gridHelper.geometry.dispose();
+    (gridHelper.material as THREE.Material).dispose();
+    gridHelper = null;
+  }
+  if (!sceneLoaded) return;
+
+  const s = computeStats();
+  if (s.box.isEmpty()) return;
+
+  const groundY = s.box.min.y;
+  const size = Math.max(s.size.x, s.size.z) * 1.05;
+  const divisions = THREE.MathUtils.clamp(Math.round(size / 2000), 20, 120);
+
+  gridHelper = new THREE.GridHelper(size, divisions, 0x444444, 0x2a2a2a);
+  gridHelper.name = 'ground_grid';
+  gridHelper.position.y = groundY;
+  gridHelper.renderOrder = -1;
+  contentRoot.add(gridHelper);
+}
+
+function updateGridVisibility() {
+  const dist = camera.position.distanceTo(controls.target);
+  if (gridHelper) {
+    gridHelper.visible = dist > Math.max(sceneMaxDim * 0.015, 3500);
+  }
+  axes.visible = dist > Math.max(sceneMaxDim * 0.008, 200);
+}
+
+function updateGridPlacement() {
+  rebuildGroundGrid();
+  updateGridVisibility();
+}
 
 const ambient = new THREE.AmbientLight(0xffffff, 0.65);
 scene.add(ambient);
 const dir = new THREE.DirectionalLight(0xffffff, 0.85);
-dir.position.set(50000, 80000, 40000);
+dir.position.set(1, 1.2, 0.8);
 scene.add(dir);
+
+function updateSceneLighting() {
+  const d = Math.max(sceneMaxDim * 0.8, 8000);
+  dir.position.set(d, d * 1.2, d * 0.7);
+}
 
 const root = new THREE.Group();
 root.name = 'collision_root';
-scene.add(root);
+contentRoot.add(root);
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -230,6 +356,8 @@ function clearScene() {
   selectedMesh = null;
   selectionEl.classList.add('hidden');
   sceneLoaded = false;
+  sceneOrigin.reset();
+  contentRoot.position.set(0, 0, 0);
   setPickMode('none');
 }
 
@@ -276,8 +404,9 @@ function rebuildGuideLine() {
   if (!guideShowCb.checked || guideUeX === null || guideUeY === null) return;
 
   const { yMin, yMax } = sceneVerticalSpan();
-  const x = guideUeX;
-  const z = -guideUeY;
+  const base = ueToLocal(guideUeX, guideUeY, 0);
+  const x = base.x;
+  const z = base.z;
   const points = [new THREE.Vector3(x, yMin, z), new THREE.Vector3(x, yMax, z)];
   const geo = new THREE.BufferGeometry().setFromPoints(points);
   const line = new THREE.Line(
@@ -453,8 +582,8 @@ function rebuildSegmentLine() {
     return;
   }
 
-  const va = ueToViewer(segmentA.x, segmentA.y, segmentA.z);
-  const vb = ueToViewer(segmentB.x, segmentB.y, segmentB.z);
+  const va = ueToLocal(segmentA.x, segmentA.y, segmentA.z);
+  const vb = ueToLocal(segmentB.x, segmentB.y, segmentB.z);
   const geo = new THREE.BufferGeometry().setFromPoints([va, vb]);
   const line = new THREE.Line(
     geo,
@@ -606,7 +735,7 @@ function applyGuideFromInputs() {
 
 function updatePivotInfo() {
   pivotInfoEl.classList.remove('error');
-  const ue = viewerToUe(controls.target);
+  const ue = localToUe(controls.target);
   const tag = customPivotActive ? '自定义' : '默认';
   pivotInfoEl.textContent = `当前中心 (${tag}) UE: ${formatUe(ue)}`;
 }
@@ -649,11 +778,12 @@ function setDisplayMode(mode: DisplayMode) {
 }
 
 function setOrbitCenterUe(ueX: number, ueY: number, ueZ: number, markCustom = true) {
-  const next = ueToViewer(ueX, ueY, ueZ);
+  const next = ueToLocal(ueX, ueY, ueZ);
   const delta = next.clone().sub(controls.target);
   camera.position.add(delta);
   controls.target.copy(next);
   controls.update();
+  updateCameraClippingPlanes();
   customPivotActive = markCustom;
   pivotXInput.value = String(ueX);
   pivotYInput.value = String(ueY);
@@ -686,7 +816,7 @@ function handleScenePick(e: PointerEvent): boolean {
   updatePointerFromEvent(e);
   const pt = raycastScenePoint();
   if (!pt) return true;
-  const ue = viewerToUe(pt);
+  const ue = localToUe(pt);
   if (pickMode === 'guide') {
     applyGuideAtUe(ue.x, ue.y);
     setPickMode('none');
@@ -725,15 +855,20 @@ function renderStats() {
     .map(([t, c]) => `<span class="type-dot" style="background:${colorCssForType(t)}"></span>${TYPE_LABELS[t] ?? t}: ${c}`)
     .join('<br/>');
 
+  const ueMin = sceneOrigin.localToUe(s.box.min.clone());
+  const ueMax = sceneOrigin.localToUe(s.box.max.clone());
+  const ueCenter = sceneOrigin.localToUe(s.center.clone());
+
   statsEl.innerHTML = `
     <table>
       <tr><td>Mesh 数</td><td>${s.meshCount}</td></tr>
       <tr><td>可见 Mesh</td><td>${Object.values(s.typeCounts).reduce((a, b) => a + b, 0)}</td></tr>
       <tr><td>三角面</td><td>${Math.round(s.triangles).toLocaleString()}</td></tr>
-      <tr><td>AABB min (cm)</td><td>(${fmt(s.box.min.x)}, ${fmt(s.box.min.y)}, ${fmt(s.box.min.z)})</td></tr>
-      <tr><td>AABB max (cm)</td><td>(${fmt(s.box.max.x)}, ${fmt(s.box.max.y)}, ${fmt(s.box.max.z)})</td></tr>
-      <tr><td>中心 (cm)</td><td>(${fmt(s.center.x)}, ${fmt(s.center.y)}, ${fmt(s.center.z)})</td></tr>
+      <tr><td>UE AABB min</td><td>${formatUe(ueMin)}</td></tr>
+      <tr><td>UE AABB max</td><td>${formatUe(ueMax)}</td></tr>
+      <tr><td>UE 中心</td><td>${formatUe(ueCenter)}</td></tr>
       <tr><td>范围 (cm)</td><td>(${fmt(s.size.x)}, ${fmt(s.size.y)}, ${fmt(s.size.z)})</td></tr>
+      <tr><td>渲染原点 (UE)</td><td>${formatUe(sceneOrigin.localToUe(new THREE.Vector3()))}</td></tr>
       <tr><td>类型</td><td>${typeLines || '—'}</td></tr>
     </table>
   `;
@@ -774,39 +909,69 @@ function applyVisibility() {
 function focusAll() {
   const s = computeStats();
   if (s.box.isEmpty()) return;
-  const center = s.center;
-  const size = s.size;
-  const maxDim = Math.max(size.x, size.y, size.z);
+  const maxDim = Math.max(s.size.x, s.size.y, s.size.z);
   const dist = maxDim * 1.2;
-  controls.target.copy(center);
-  camera.position.set(center.x + dist * 0.6, center.y + dist * 0.5, center.z + dist * 0.6);
-  camera.near = Math.max(1, maxDim / 1000);
-  camera.far = maxDim * 20;
-  camera.updateProjectionMatrix();
+  sceneMaxDim = maxDim;
+  updateSceneLighting();
+  controls.target.set(0, 0, 0);
+  placeCameraAroundTarget(dist);
+  updateCameraClippingPlanes();
+  updateControlSensitivity();
   controls.update();
   customPivotActive = false;
   pivotCrossGroup.visible = false;
-  const ue = viewerToUe(center);
+  const ue = localToUe(new THREE.Vector3(0, 0, 0));
   pivotXInput.value = ue.x.toFixed(1);
   pivotYInput.value = ue.y.toFixed(1);
   pivotZInput.value = ue.z.toFixed(1);
   updatePivotInfo();
   rebuildGuideLine();
   rebuildSegmentLine();
+  updateGridPlacement();
 }
 
 function resetCamera() {
-  camera.position.copy(initialCameraPos);
-  camera.near = 10;
-  camera.far = 500000;
-  camera.updateProjectionMatrix();
   controls.target.set(0, 0, 0);
+  if (sceneLoaded) {
+    const dist = Math.max(sceneMaxDim * 1.2, 5000);
+    placeCameraAroundTarget(dist);
+  } else {
+    placeCameraAroundTarget(initialCameraDistance);
+  }
+  updateCameraClippingPlanes();
+  updateControlSensitivity();
   controls.update();
   clearCustomPivot();
   pivotXInput.value = '';
   pivotYInput.value = '';
   pivotZInput.value = '';
   updatePivotInfo();
+}
+
+function meshAabbInUe(mesh: THREE.Mesh) {
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = box.getSize(new THREE.Vector3());
+  return {
+    ueMin: sceneOrigin.localToUe(box.min.clone()),
+    ueMax: sceneOrigin.localToUe(box.max.clone()),
+    size,
+  };
+}
+
+function renderSelectionPanel(entry: MeshEntry) {
+  const fmt = (v: number) => v.toFixed(1);
+  const { ueMin, ueMax, size } = meshAabbInUe(entry.mesh);
+  selectionEl.innerHTML = `
+    <div class="sel-title">选中 Shape</div>
+    <table>
+      <tr><td>ID</td><td>${entry.id}</td></tr>
+      <tr><td>类型</td><td><span class="type-dot inline" style="background:${colorCssForType(entry.shapeType)}"></span>${TYPE_LABELS[entry.shapeType] ?? entry.shapeType}</td></tr>
+      <tr><td>Trigger</td><td>${entry.isTrigger ? '是' : '否'}</td></tr>
+      <tr><td>UE AABB min</td><td>${formatUe(ueMin)}</td></tr>
+      <tr><td>UE AABB max</td><td>${formatUe(ueMax)}</td></tr>
+      <tr><td>范围 (cm)</td><td>(${fmt(size.x)}, ${fmt(size.y)}, ${fmt(size.z)})</td></tr>
+    </table>
+  `;
 }
 
 function selectMesh(mesh: THREE.Mesh | null) {
@@ -827,12 +992,7 @@ function selectMesh(mesh: THREE.Mesh | null) {
   const base = (entry.mesh.userData.baseColor as number) ?? colorHexForType(entry.shapeType);
   setMeshHighlight(entry.mesh, displayMode, true, base);
   selectionEl.classList.remove('hidden');
-  selectionEl.innerHTML = `
-    <div class="sel-title">选中 Shape</div>
-    <div>ID: ${entry.id}</div>
-    <div>类型: <span class="type-dot inline" style="background:${colorCssForType(entry.shapeType)}"></span>${TYPE_LABELS[entry.shapeType] ?? entry.shapeType}</div>
-    <div>Trigger: ${entry.isTrigger ? '是' : '否'}</div>
-  `;
+  renderSelectionPanel(entry);
 }
 
 function readMeshMeta(obj: THREE.Mesh): { shapeType: string; isTrigger: boolean; id: string } {
@@ -877,6 +1037,11 @@ function ingestGltf(gltf: { scene: THREE.Group; parser?: { json: { meshes?: Arra
   rebuildTypeFilters([...types]);
   applyVisibility();
   sceneLoaded = true;
+
+  const s = computeStats();
+  sceneMaxDim = Math.max(s.size.x, s.size.y, s.size.z, 1000);
+  bakeSceneOrigin(s.center);
+
   applyDisplayMode();
   renderStats();
   focusAll();
@@ -1024,8 +1189,16 @@ for (const el of [segAxInput, segAyInput, segAzInput, segBxInput, segByInput, se
 }
 
 controls.addEventListener('change', () => {
+  tryFloatingOriginRebase();
+  updateCameraClippingPlanes();
+  updateControlSensitivity();
   updatePivotInfo();
   if (customPivotActive) updatePivotCross();
+  updateGridVisibility();
+});
+
+canvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
 });
 
 updatePivotInfo();
@@ -1041,6 +1214,12 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
+
+canvas.addEventListener('wheel', (e) => {
+  if (!sceneLoaded) return;
+  e.preventDefault();
+  applyWheelZoom(e.deltaY);
+}, { passive: false });
 
 canvas.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
@@ -1067,6 +1246,26 @@ canvas.addEventListener('drop', (e) => {
 });
 
 void tryLoadDefault();
+
+if (import.meta.env.DEV) {
+  window.__physixDebug = {
+    isSceneLoaded: () => sceneLoaded,
+    getDist: () => camera.position.distanceTo(controls.target),
+    zoomIn: () => applyWheelZoom(-120),
+    zoomOut: () => applyWheelZoom(120),
+    getGridY: () => gridHelper?.position.y ?? null,
+    getGridVisible: () => gridHelper?.visible ?? false,
+    getBoxMinY: () => computeStats().box.min.y,
+    getOriginOffsetLen: () => sceneOrigin.offset.length(),
+    getPanSpeed: () => controls.panSpeed,
+    nudgeTarget: (dx: number) => {
+      controls.target.x += dx;
+      camera.position.x += dx;
+      controls.update();
+    },
+    getTargetX: () => controls.target.x,
+  };
+}
 
 function animate() {
   requestAnimationFrame(animate);

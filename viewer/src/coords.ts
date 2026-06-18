@@ -13,6 +13,14 @@ export function formatUe(v: THREE.Vector3): string {
   return `(${v.x.toFixed(1)}, ${v.y.toFixed(1)}, ${v.z.toFixed(1)})`;
 }
 
+export function viewerLocalToUe(local: THREE.Vector3, sceneCenter: THREE.Vector3): THREE.Vector3 {
+  return viewerToUe(local.clone().add(sceneCenter));
+}
+
+export function ueToViewerLocal(x: number, y: number, z: number, sceneCenter: THREE.Vector3): THREE.Vector3 {
+  return ueToViewer(x, y, z).sub(sceneCenter);
+}
+
 export function parseNumInput(raw: string): number | null {
   const t = raw.trim();
   if (t === '') return null;

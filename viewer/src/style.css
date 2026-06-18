@@ -184,6 +184,22 @@ body,
   margin-bottom: 4px;
 }
 
+#selection table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#selection td {
+  padding: 2px 0;
+  vertical-align: top;
+}
+
+#selection td:first-child {
+  color: #9aa0a6;
+  padding-right: 10px;
+  white-space: nowrap;
+}
+
 .type-dot {
   display: inline-block;
   width: 10px;
