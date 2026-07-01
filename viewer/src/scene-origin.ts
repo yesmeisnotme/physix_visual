@@ -80,5 +80,12 @@ function translateMeshGeometries(meshes: THREE.Mesh[], shift: THREE.Vector3) {
     mesh.geometry.translate(shift.x, shift.y, shift.z);
     mesh.geometry.computeBoundingBox();
     mesh.geometry.computeBoundingSphere();
+    for (const child of mesh.children) {
+      if (child instanceof THREE.Line || child instanceof THREE.LineSegments || child instanceof THREE.Points) {
+        child.geometry.translate(shift.x, shift.y, shift.z);
+        child.geometry.computeBoundingBox();
+        child.geometry.computeBoundingSphere();
+      }
+    }
   }
 }

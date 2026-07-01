@@ -21,6 +21,22 @@
           <button id="open-btn" type="button">打开 collision.bin</button>
           <input id="file-input" type="file" accept=".bin" hidden />
         </div>
+        <div class="panel">
+          <h2>空气墙</h2>
+          <p class="field-hint">加载地图后，选择 AirWallTable.xml 与小 bin 目录</p>
+          <div class="picker-row">
+            <button id="airwall-table-pick" type="button" class="btn-secondary">选择 XML</button>
+            <div id="airwall-table-selected" class="selected-file">未选择</div>
+          </div>
+          <div class="picker-row">
+            <button id="airwall-bin-pick" type="button" class="btn-secondary">选择 bin 目录</button>
+            <div id="airwall-bin-selected" class="selected-file">未选择</div>
+          </div>
+          <div class="btn-row">
+            <button id="airwall-clear" type="button" class="btn-secondary">清除</button>
+          </div>
+          <div id="airwall-info" class="pivot-info">—</div>
+        </div>
         <div id="stats" class="panel"></div>
         <div id="selection" class="panel hidden"></div>
         <div class="panel">

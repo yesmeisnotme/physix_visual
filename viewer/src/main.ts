@@ -2,7 +2,7 @@ import './style.css';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { formatUe, parseNumInput } from './coords';
+import { formatUe, parseNumInput, ueToViewer, viewerToUe } from './coords';
 import { SceneOrigin } from './scene-origin';
 import {
   type DisplayMode,
@@ -36,6 +36,11 @@ const TYPE_COLORS: Record<string, number> = {
   unknown: 0xd0d4dc,
 };
 
+const AIRWALL_COLOR = 0xff4fd8;
+const AIRWALL_LABEL_COLOR = '#ff4fd8';
+const AIRWALL_LABEL_BG = 'rgba(20, 24, 32, 0.88)';
+const AIRWALL_LABEL_TEXT = '#f8fbff';
+
 function colorHexForType(type: string): number {
   return TYPE_COLORS[type] ?? TYPE_COLORS.unknown;
 }
@@ -44,8 +49,8 @@ function colorCssForType(type: string): string {
   return `#${colorHexForType(type).toString(16).padStart(6, '0')}`;
 }
 
-function applyMeshTypeColor(mesh: THREE.Mesh, shapeType: string) {
-  const hex = colorHexForType(shapeType);
+function applyMeshTypeColor(mesh: THREE.Mesh, shapeType: string, colorOverride?: number) {
+  const hex = colorOverride ?? colorHexForType(shapeType);
   const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
   for (const raw of mats) {
     const mat = raw as THREE.MeshStandardMaterial;
@@ -67,17 +72,133 @@ function applyMeshTypeColor(mesh: THREE.Mesh, shapeType: string) {
   attachDashedOutline(mesh, hex);
 }
 
+function applyAirWallDisplayToMesh(
+  mesh: THREE.Mesh,
+  mode: DisplayMode,
+  dashSize: number,
+  gapSize: number,
+  baseColor: number,
+) {
+  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  for (const raw of mats) {
+    const mat = raw as THREE.MeshStandardMaterial;
+    mat.wireframe = false;
+    mat.color.setHex(baseColor);
+    mat.emissive.setHex(0x000000);
+    mat.transparent = true;
+    mat.opacity = mode === 'dashed' ? 0.28 : 0.46;
+    mat.depthWrite = false;
+    mat.depthTest = false;
+    mat.visible = true;
+    mat.side = THREE.DoubleSide;
+    mat.needsUpdate = true;
+  }
+  mesh.renderOrder = 3;
+
+  const outline = mesh.getObjectByName('collision_outline') as THREE.LineSegments | undefined;
+  if (!outline) return;
+  const mat = outline.material as THREE.LineDashedMaterial;
+  mat.color.setHex(baseColor);
+  mat.dashSize = dashSize;
+  mat.gapSize = gapSize;
+  mat.opacity = 1;
+  mat.transparent = true;
+  mat.depthWrite = false;
+  mat.depthTest = false;
+  mat.needsUpdate = true;
+  outline.computeLineDistances();
+  outline.visible = true;
+  outline.renderOrder = 4;
+  outline.frustumCulled = false;
+}
+
 interface MeshEntry {
   mesh: THREE.Mesh;
   shapeType: string;
   isTrigger: boolean;
   id: string;
+  layer: 'map' | 'airwall';
+  airWallId?: string;
+  airWallDesc?: string;
+  source?: string;
+}
+
+interface AirWallLabelEntry {
+  key: string;
+  id: string;
+  desc: string;
+  text: string;
+  sprite: THREE.Sprite;
+  line: THREE.Line;
 }
 
 interface ConvertResult {
   url: string;
   source: string;
   cached?: boolean;
+}
+
+interface LoadedMainCollision {
+  url: string;
+  source: string;
+  cached?: boolean;
+}
+
+interface AirWallCollision {
+  fileName: string;
+  source: string;
+  url: string;
+  cached?: boolean;
+}
+
+interface AirWallRecord {
+  id: string;
+  desc: string;
+  pos: { x: number; y: number; z: number };
+  rot: { x: number; y: number; z: number; w: number };
+  collisions: AirWallCollision[];
+}
+
+interface AirWallTableResult {
+  source: string;
+  binDir: string;
+  airwalls: AirWallRecord[];
+}
+
+interface AirWallUploadFile {
+  file: File;
+  relativePath: string;
+}
+
+type AirWallLoadRequest =
+  | { kind: 'path'; tablePath: string; binDir?: string }
+  | { kind: 'upload'; tableFile: File; binFiles: AirWallUploadFile[] };
+
+type AirWallTableSelection =
+  | { kind: 'path'; path: string; label: string }
+  | { kind: 'upload'; file: File; label: string };
+
+type AirWallBinSelection =
+  | { kind: 'path'; path: string; label: string }
+  | { kind: 'upload'; files: AirWallUploadFile[]; label: string };
+
+type BrowserFileSystemFileHandle = {
+  kind: 'file';
+  name: string;
+  getFile(): Promise<File>;
+};
+
+type BrowserFileSystemDirectoryHandle = {
+  kind: 'directory';
+  name: string;
+  entries(): AsyncIterableIterator<[string, BrowserFileSystemHandle]>;
+};
+
+type BrowserFileSystemHandle = BrowserFileSystemFileHandle | BrowserFileSystemDirectoryHandle;
+
+interface BrowserFileSystemWindow extends Window {
+  showOpenFilePicker?: (options?: unknown) => Promise<BrowserFileSystemFileHandle[]>;
+  showDirectoryPicker?: (options?: unknown) => Promise<BrowserFileSystemDirectoryHandle>;
 }
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
@@ -91,6 +212,12 @@ const openBtn = document.getElementById('open-btn') as HTMLButtonElement;
 const loadingEl = document.getElementById('loading')!;
 const loadingTextEl = document.getElementById('loading-text')!;
 const sourceEl = document.getElementById('source')!;
+const airWallTablePickBtn = document.getElementById('airwall-table-pick') as HTMLButtonElement;
+const airWallTableSelectedEl = document.getElementById('airwall-table-selected')!;
+const airWallBinPickBtn = document.getElementById('airwall-bin-pick') as HTMLButtonElement;
+const airWallBinSelectedEl = document.getElementById('airwall-bin-selected')!;
+const airWallClearBtn = document.getElementById('airwall-clear') as HTMLButtonElement;
+const airWallInfoEl = document.getElementById('airwall-info')!;
 const guideXInput = document.getElementById('guide-x') as HTMLInputElement;
 const guideYInput = document.getElementById('guide-y') as HTMLInputElement;
 const guideShowCb = document.getElementById('guide-show') as HTMLInputElement;
@@ -159,6 +286,7 @@ function tryFloatingOriginRebase() {
       sceneMaxDim,
     )
   ) {
+    rebuildAirWallLabels();
     rebuildGuideLine();
     rebuildSegmentLine();
     updateCameraClippingPlanes();
@@ -307,11 +435,24 @@ const root = new THREE.Group();
 root.name = 'collision_root';
 contentRoot.add(root);
 
+const airWallLabelGroup = new THREE.Group();
+airWallLabelGroup.name = 'airwall_labels';
+contentRoot.add(airWallLabelGroup);
+
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const meshEntries: MeshEntry[] = [];
+const airWallLabelEntries: AirWallLabelEntry[] = [];
 let selectedMesh: THREE.Mesh | null = null;
 let typeFilterState: Record<string, boolean> = {};
+let loadedAirWallTable: AirWallTableResult | null = null;
+let currentMainCollision: LoadedMainCollision | null = null;
+let selectedAirWallTablePath: string | null = null;
+let selectedAirWallBinDirPath: string | null = null;
+let selectedAirWallTableFile: File | null = null;
+let selectedAirWallBinFiles: AirWallUploadFile[] = [];
+let selectedAirWallTableLabel: string | null = null;
+let selectedAirWallBinLabel: string | null = null;
 let loading = false;
 
 function setLoading(on: boolean, text = '正在转换 collision.bin…') {
@@ -319,15 +460,36 @@ function setLoading(on: boolean, text = '正在转换 collision.bin…') {
   loadingTextEl.textContent = text;
   loadingEl.classList.toggle('hidden', !on);
   openBtn.disabled = on;
+  airWallTablePickBtn.disabled = on;
+  airWallBinPickBtn.disabled = on;
+  airWallClearBtn.disabled = on;
 }
 
-function showSource(source: string, cached?: boolean) {
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function showSource(source: string, cached?: boolean, airwalls: AirWallTableResult | null = loadedAirWallTable) {
   const name = source.split(/[/\\]/).pop() ?? source;
+  const airWallCount = airwalls?.airwalls.length ?? 0;
+  const airWallFileCount = airwalls?.airwalls.reduce((sum, row) => sum + row.collisions.length, 0) ?? 0;
+  const airWallName = airwalls?.source.split(/[/\\]/).pop() ?? '';
   sourceEl.classList.remove('hidden');
   sourceEl.innerHTML = `
     <div class="source-title">当前文件</div>
-    <div class="source-name" title="${source}">${name}</div>
+    <div class="source-name" title="${escapeHtml(source)}">${escapeHtml(name)}</div>
     <div class="source-meta">${cached ? '来自缓存' : '已转换'} · 原始文件未修改</div>
+    ${
+      airwalls
+        ? `<div class="source-title airwall-source-title">空气墙</div>
+           <div class="source-name" title="${escapeHtml(airwalls.source)}">${escapeHtml(airWallName)}</div>
+           <div class="source-meta">实例 ${airWallCount} 个 · collision bin ${airWallFileCount} 个</div>`
+        : ''
+    }
   `;
 }
 
@@ -335,7 +497,178 @@ function showError(message: string) {
   statsEl.innerHTML = `<p class="error">${message}</p>`;
 }
 
+function setAirWallInfo(message: string, error = false) {
+  airWallInfoEl.textContent = message;
+  airWallInfoEl.classList.toggle('error', error);
+}
+
+function fileDisplayName(pathOrName: string): string {
+  return pathOrName.split(/[/\\]/).pop() ?? pathOrName;
+}
+
+function updateAirWallSelectionSummary() {
+  airWallTableSelectedEl.textContent = selectedAirWallTableLabel ?? '未选择';
+  airWallBinSelectedEl.textContent = selectedAirWallBinLabel ?? '未选择';
+}
+
+function clearAirWallSelection() {
+  selectedAirWallTablePath = null;
+  selectedAirWallBinDirPath = null;
+  selectedAirWallTableFile = null;
+  selectedAirWallBinFiles = [];
+  selectedAirWallTableLabel = null;
+  selectedAirWallBinLabel = null;
+  updateAirWallSelectionSummary();
+}
+
+function airWallEntryKey(entry: Pick<MeshEntry, 'airWallId' | 'airWallDesc'>): string {
+  return `${entry.airWallId ?? ''}\n${entry.airWallDesc ?? ''}`;
+}
+
+function airWallLabelText(id: string, desc: string): string {
+  const title = desc.trim();
+  const raw = title ? `#${id} ${title}` : `#${id}`;
+  return raw.length > 48 ? `${raw.slice(0, 45)}...` : raw;
+}
+
+function createLabelTexture(text: string): { texture: THREE.CanvasTexture; aspect: number } {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('无法创建空气墙标签');
+
+  const fontSize = 34;
+  const padX = 18;
+  const padY = 10;
+  ctx.font = `600 ${fontSize}px "Segoe UI", "Microsoft YaHei", sans-serif`;
+  const metrics = ctx.measureText(text);
+  canvas.width = Math.ceil(metrics.width + padX * 2);
+  canvas.height = fontSize + padY * 2 + 4;
+
+  ctx.font = `600 ${fontSize}px "Segoe UI", "Microsoft YaHei", sans-serif`;
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = AIRWALL_LABEL_BG;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = AIRWALL_LABEL_COLOR;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(1.5, 1.5, canvas.width - 3, canvas.height - 3);
+  ctx.fillStyle = AIRWALL_LABEL_TEXT;
+  ctx.fillText(text, padX, canvas.height * 0.5);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return { texture, aspect: canvas.width / canvas.height };
+}
+
+function disposeAirWallLabels() {
+  for (const entry of airWallLabelEntries) {
+    const mat = entry.sprite.material as THREE.SpriteMaterial;
+    mat.map?.dispose();
+    mat.dispose();
+    entry.line.geometry.dispose();
+    (entry.line.material as THREE.Material).dispose();
+  }
+  airWallLabelEntries.length = 0;
+  airWallLabelGroup.clear();
+}
+
+function rebuildAirWallLabels() {
+  disposeAirWallLabels();
+  const groups = new Map<
+    string,
+    { id: string; desc: string; entries: MeshEntry[]; box: THREE.Box3 }
+  >();
+
+  for (const entry of meshEntries) {
+    if (entry.layer !== 'airwall' || !entry.airWallId) continue;
+    const key = airWallEntryKey(entry);
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        id: entry.airWallId,
+        desc: entry.airWallDesc ?? '',
+        entries: [],
+        box: new THREE.Box3(),
+      };
+      groups.set(key, group);
+    }
+    group.entries.push(entry);
+    group.box.expandByObject(entry.mesh);
+  }
+
+  const labelHeight = THREE.MathUtils.clamp(sceneMaxDim * 0.015, 360, 1500);
+  const stackCounts = new Map<string, number>();
+  const rows = [...groups.entries()].sort((a, b) => {
+    const an = Number(a[1].id);
+    const bn = Number(b[1].id);
+    if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
+    return a[1].id.localeCompare(b[1].id);
+  });
+
+  for (const [key, group] of rows) {
+    if (group.box.isEmpty()) continue;
+    const center = group.box.getCenter(new THREE.Vector3());
+    const stackKey = `${Math.round(center.x / 100)}:${Math.round(center.z / 100)}`;
+    const stackIndex = stackCounts.get(stackKey) ?? 0;
+    stackCounts.set(stackKey, stackIndex + 1);
+
+    const text = airWallLabelText(group.id, group.desc);
+    const { texture, aspect } = createLabelTexture(text);
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+      }),
+    );
+
+    const y = group.box.max.y + labelHeight * (0.82 + stackIndex * 1.08);
+    sprite.name = `airwall_label_${group.id}`;
+    sprite.renderOrder = 1002;
+    sprite.scale.set(labelHeight * aspect, labelHeight, 1);
+    sprite.position.set(center.x, y, center.z);
+
+    const lineBottom = y - labelHeight * 0.48;
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(center.x, group.box.max.y, center.z),
+      new THREE.Vector3(center.x, lineBottom, center.z),
+    ]);
+    const line = new THREE.Line(
+      lineGeo,
+      new THREE.LineBasicMaterial({
+        color: AIRWALL_COLOR,
+        depthTest: false,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.9,
+      }),
+    );
+    line.name = `airwall_label_line_${group.id}`;
+    line.renderOrder = 1001;
+
+    airWallLabelGroup.add(line);
+    airWallLabelGroup.add(sprite);
+    airWallLabelEntries.push({ key, id: group.id, desc: group.desc, text, sprite, line });
+  }
+
+  updateAirWallLabelVisibility();
+}
+
+function updateAirWallLabelVisibility() {
+  for (const label of airWallLabelEntries) {
+    const visible = meshEntries.some(
+      (entry) => entry.layer === 'airwall' && airWallEntryKey(entry) === label.key && entry.mesh.visible,
+    );
+    label.sprite.visible = visible;
+    label.line.visible = visible;
+  }
+}
+
 function clearScene() {
+  disposeAirWallLabels();
   while (root.children.length) {
     const child = root.children[0];
     root.remove(child);
@@ -354,6 +687,7 @@ function clearScene() {
   }
   meshEntries.length = 0;
   selectedMesh = null;
+  loadedAirWallTable = null;
   selectionEl.classList.add('hidden');
   sceneLoaded = false;
   sceneOrigin.reset();
@@ -365,9 +699,18 @@ function computeStats() {
   const box = new THREE.Box3();
   let triangles = 0;
   const typeCounts: Record<string, number> = {};
+  let mapMeshCount = 0;
+  let airWallMeshCount = 0;
+  const visibleAirWallIds = new Set<string>();
 
   for (const entry of meshEntries) {
     if (!entry.mesh.visible) continue;
+    if (entry.layer === 'airwall') {
+      airWallMeshCount++;
+      if (entry.airWallId) visibleAirWallIds.add(entry.airWallId);
+    } else {
+      mapMeshCount++;
+    }
     box.expandByObject(entry.mesh);
     const geo = entry.mesh.geometry;
     if (geo.index) triangles += geo.index.count / 3;
@@ -378,7 +721,17 @@ function computeStats() {
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
 
-  return { box, center, size, triangles, typeCounts, meshCount: meshEntries.length };
+  return {
+    box,
+    center,
+    size,
+    triangles,
+    typeCounts,
+    meshCount: meshEntries.length,
+    mapMeshCount,
+    airWallMeshCount,
+    visibleAirWallCount: visibleAirWallIds.size,
+  };
 }
 
 function sceneVerticalSpan(): { yMin: number; yMax: number } {
@@ -758,7 +1111,11 @@ function applyDisplayMode() {
   const { dashSize, gapSize } = getAdaptiveDashSizes(s.box);
   for (const entry of meshEntries) {
     const base = (entry.mesh.userData.baseColor as number | undefined) ?? colorHexForType(entry.shapeType);
-    applyDisplayModeToMesh(entry.mesh, displayMode, dashSize, gapSize, base);
+    if (entry.layer === 'airwall') {
+      applyAirWallDisplayToMesh(entry.mesh, displayMode, dashSize, gapSize, base);
+    } else {
+      applyDisplayModeToMesh(entry.mesh, displayMode, dashSize, gapSize, base);
+    }
   }
   if (selectedMesh) {
     const entry = meshEntries.find((e) => e.mesh === selectedMesh);
@@ -863,6 +1220,8 @@ function renderStats() {
     <table>
       <tr><td>Mesh 数</td><td>${s.meshCount}</td></tr>
       <tr><td>可见 Mesh</td><td>${Object.values(s.typeCounts).reduce((a, b) => a + b, 0)}</td></tr>
+      <tr><td>主地图 Mesh</td><td>${s.mapMeshCount}</td></tr>
+      <tr><td>空气墙</td><td>${s.visibleAirWallCount} 实例 / ${s.airWallMeshCount} Mesh</td></tr>
       <tr><td>三角面</td><td>${Math.round(s.triangles).toLocaleString()}</td></tr>
       <tr><td>UE AABB min</td><td>${formatUe(ueMin)}</td></tr>
       <tr><td>UE AABB max</td><td>${formatUe(ueMax)}</td></tr>
@@ -902,6 +1261,7 @@ function applyVisibility() {
     const triggerOk = showTriggersCb.checked || !entry.isTrigger;
     entry.mesh.visible = typeOk && triggerOk;
   }
+  updateAirWallLabelVisibility();
   renderStats();
   if (segShowCb.checked && segmentA && segmentB) rebuildSegmentLine();
 }
@@ -958,13 +1318,77 @@ function meshAabbInUe(mesh: THREE.Mesh) {
   };
 }
 
+function getAirWallDebugAabbs() {
+  return meshEntries
+    .filter((entry) => entry.layer === 'airwall')
+    .map((entry) => {
+      const { ueMin, ueMax, size } = meshAabbInUe(entry.mesh);
+      return {
+        id: entry.airWallId ?? '',
+        desc: entry.airWallDesc ?? '',
+        source: entry.source ?? '',
+        min: { x: ueMin.x, y: ueMin.y, z: ueMin.z },
+        max: { x: ueMax.x, y: ueMax.y, z: ueMax.z },
+        center: {
+          x: (ueMin.x + ueMax.x) * 0.5,
+          y: (ueMin.y + ueMax.y) * 0.5,
+          z: (ueMin.z + ueMax.z) * 0.5,
+        },
+        size: { x: size.x, y: size.z, z: size.y },
+      };
+    });
+}
+
+function getAirWallDebugLabels() {
+  return airWallLabelEntries.map((entry) => {
+    const ue = sceneOrigin.localToUe(entry.sprite.position.clone());
+    return {
+      id: entry.id,
+      desc: entry.desc,
+      text: entry.text,
+      visible: entry.sprite.visible,
+      ue: { x: ue.x, y: ue.y, z: ue.z },
+    };
+  });
+}
+
+function getAirWallDebugVisualStates() {
+  return meshEntries
+    .filter((entry) => entry.layer === 'airwall')
+    .map((entry) => {
+      const mats = Array.isArray(entry.mesh.material) ? entry.mesh.material : [entry.mesh.material];
+      const first = mats[0] as THREE.MeshStandardMaterial;
+      const outline = entry.mesh.getObjectByName('collision_outline') as THREE.LineSegments | undefined;
+      return {
+        id: entry.airWallId ?? '',
+        materialVisible: first.visible,
+        transparent: first.transparent,
+        opacity: first.opacity,
+        depthWrite: first.depthWrite,
+        depthTest: first.depthTest,
+        renderOrder: entry.mesh.renderOrder,
+        outlineVisible: outline?.visible ?? false,
+        frustumCulled: entry.mesh.frustumCulled,
+      };
+    });
+}
+
 function renderSelectionPanel(entry: MeshEntry) {
   const fmt = (v: number) => v.toFixed(1);
   const { ueMin, ueMax, size } = meshAabbInUe(entry.mesh);
+  const layerLabel = entry.layer === 'airwall' ? '空气墙' : '主地图';
+  const airWallRows =
+    entry.layer === 'airwall'
+      ? `
+      <tr><td>AirWall</td><td>#${escapeHtml(entry.airWallId ?? '—')} ${escapeHtml(entry.airWallDesc ?? '')}</td></tr>
+      <tr><td>来源</td><td>${escapeHtml(entry.source ?? '—')}</td></tr>`
+      : '';
   selectionEl.innerHTML = `
     <div class="sel-title">选中 Shape</div>
     <table>
-      <tr><td>ID</td><td>${entry.id}</td></tr>
+      <tr><td>ID</td><td>${escapeHtml(entry.id)}</td></tr>
+      <tr><td>层</td><td>${layerLabel}</td></tr>
+      ${airWallRows}
       <tr><td>类型</td><td><span class="type-dot inline" style="background:${colorCssForType(entry.shapeType)}"></span>${TYPE_LABELS[entry.shapeType] ?? entry.shapeType}</td></tr>
       <tr><td>Trigger</td><td>${entry.isTrigger ? '是' : '否'}</td></tr>
       <tr><td>UE AABB min</td><td>${formatUe(ueMin)}</td></tr>
@@ -995,6 +1419,17 @@ function selectMesh(mesh: THREE.Mesh | null) {
   renderSelectionPanel(entry);
 }
 
+type GltfScene = {
+  scene: THREE.Group;
+  parser?: { json: { meshes?: Array<{ extras?: { shapeType?: string; isTrigger?: boolean }; name?: string }> } };
+};
+
+interface AddGltfOptions {
+  layer: 'map' | 'airwall';
+  airWall?: AirWallRecord;
+  collision?: AirWallCollision;
+}
+
 function readMeshMeta(obj: THREE.Mesh): { shapeType: string; isTrigger: boolean; id: string } {
   const ud = obj.userData as { shapeType?: string; isTrigger?: boolean; name?: string };
   let shapeType = ud.shapeType ?? 'unknown';
@@ -1009,16 +1444,45 @@ function readMeshMeta(obj: THREE.Mesh): { shapeType: string; isTrigger: boolean;
   return { shapeType, isTrigger, id: obj.name || ud.name || 'mesh' };
 }
 
-function ingestGltf(gltf: { scene: THREE.Group; parser?: { json: { meshes?: Array<{ extras?: { shapeType?: string; isTrigger?: boolean }; name?: string }> } } }) {
-  clearScene();
+function bakeAirWallMeshToWorld(mesh: THREE.Mesh, airWall: AirWallRecord) {
+  mesh.updateWorldMatrix(true, false);
+  const meshLocalToWorld = mesh.matrixWorld.clone();
+  const meshWorldToLocal = mesh.matrixWorld.clone().invert();
+
+  mesh.geometry = mesh.geometry.clone();
+  const posAttr = mesh.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+  if (!posAttr) return;
+
+  const q = new THREE.Quaternion(airWall.rot.x, airWall.rot.y, airWall.rot.z, airWall.rot.w);
+  if (q.lengthSq() < 1e-12) q.identity();
+  else q.normalize();
+
+  const airWallPos = new THREE.Vector3(airWall.pos.x, airWall.pos.y, airWall.pos.z);
+  const viewer = new THREE.Vector3();
+  const ue = new THREE.Vector3();
+  for (let i = 0; i < posAttr.count; i++) {
+    viewer.fromBufferAttribute(posAttr, i);
+    viewer.applyMatrix4(meshLocalToWorld);
+    ue.copy(viewerToUe(viewer)).applyQuaternion(q).add(airWallPos);
+    viewer.copy(ueToViewer(ue.x, ue.y, ue.z)).applyMatrix4(meshWorldToLocal);
+    posAttr.setXYZ(i, viewer.x, viewer.y, viewer.z);
+  }
+  posAttr.needsUpdate = true;
+
+  mesh.geometry.computeBoundingBox();
+  mesh.geometry.computeBoundingSphere();
+  mesh.geometry.computeVertexNormals();
+}
+
+function addGltfScene(gltf: GltfScene, options: AddGltfOptions) {
   root.add(gltf.scene);
+  gltf.scene.updateMatrixWorld(true);
 
   const meshExtrasByIndex = new Map<number, { shapeType?: string; isTrigger?: boolean; name?: string }>();
   gltf.parser?.json.meshes?.forEach((m, i) => {
     if (m.extras || m.name) meshExtrasByIndex.set(i, { ...m.extras, name: m.name });
   });
 
-  const types = new Set<string>();
   gltf.scene.traverse((obj) => {
     if (!(obj instanceof THREE.Mesh)) return;
     const meshIndex = (obj as THREE.Mesh & { userData?: { meshIndex?: number } }).userData?.meshIndex;
@@ -1028,12 +1492,37 @@ function ingestGltf(gltf: { scene: THREE.Group; parser?: { json: { meshes?: Arra
       obj.userData.isTrigger = fromJson.isTrigger;
       if (fromJson.name) obj.name = fromJson.name;
     }
+    if (options.layer === 'airwall' && options.airWall) {
+      bakeAirWallMeshToWorld(obj, options.airWall);
+      obj.frustumCulled = false;
+    }
     const meta = readMeshMeta(obj);
-    applyMeshTypeColor(obj, meta.shapeType);
-    types.add(meta.shapeType);
-    meshEntries.push({ mesh: obj, ...meta });
+    const baseColor = options.layer === 'airwall' ? AIRWALL_COLOR : undefined;
+    applyMeshTypeColor(obj, meta.shapeType, baseColor);
+    if (options.layer === 'airwall') {
+      const outline = obj.getObjectByName('collision_outline');
+      if (outline) outline.frustumCulled = false;
+    }
+    const fileName = options.collision?.fileName;
+    const id =
+      options.layer === 'airwall' && options.airWall
+        ? `airwall_${options.airWall.id}_${fileName ?? 'collision'}_${meta.id}`
+        : meta.id;
+    if (id) obj.name = id;
+    meshEntries.push({
+      mesh: obj,
+      ...meta,
+      id,
+      layer: options.layer,
+      airWallId: options.airWall?.id,
+      airWallDesc: options.airWall?.desc,
+      source: fileName ?? options.collision?.source,
+    });
   });
+}
 
+function finalizeLoadedScene() {
+  const types = new Set(meshEntries.map((entry) => entry.shapeType));
   rebuildTypeFilters([...types]);
   applyVisibility();
   sceneLoaded = true;
@@ -1041,6 +1530,7 @@ function ingestGltf(gltf: { scene: THREE.Group; parser?: { json: { meshes?: Arra
   const s = computeStats();
   sceneMaxDim = Math.max(s.size.x, s.size.y, s.size.z, 1000);
   bakeSceneOrigin(s.center);
+  rebuildAirWallLabels();
 
   applyDisplayMode();
   renderStats();
@@ -1051,9 +1541,8 @@ function ingestGltf(gltf: { scene: THREE.Group; parser?: { json: { meshes?: Arra
 
 const loader = new GLTFLoader();
 
-async function loadGltfUrl(url: string) {
-  const gltf = await loader.loadAsync(url);
-  ingestGltf(gltf);
+async function loadGltfUrl(url: string): Promise<GltfScene> {
+  return await loader.loadAsync(url);
 }
 
 async function convertByPath(filePath: string): Promise<ConvertResult> {
@@ -1081,31 +1570,310 @@ async function convertByUpload(file: File): Promise<ConvertResult> {
   return data;
 }
 
-async function openCollisionFromPath(filePath: string) {
+async function loadAirWallTable(filePath: string, binDir?: string): Promise<AirWallTableResult> {
+  const res = await fetch('/api/airwalls', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: filePath, binDir }),
+  });
+  const data = (await res.json()) as AirWallTableResult & { error?: string };
+  if (!res.ok) throw new Error(data.error ?? '空气墙配置加载失败');
+  return data;
+}
+
+async function loadAirWallTableUpload(tableFile: File, binFiles: AirWallUploadFile[]): Promise<AirWallTableResult> {
+  const form = new FormData();
+  form.append('table', tableFile, tableFile.name);
+  for (const item of binFiles) {
+    form.append('binPaths', item.relativePath);
+    form.append('binFiles', item.file, item.file.name);
+  }
+
+  const res = await fetch('/api/airwalls-upload', {
+    method: 'POST',
+    body: form,
+  });
+  const data = (await res.json()) as AirWallTableResult & { error?: string };
+  if (!res.ok) throw new Error(data.error ?? '空气墙配置加载失败');
+  return data;
+}
+
+interface PickLocalPathResult {
+  path: string | null;
+  error?: string;
+}
+
+async function pickAirWallTablePath(): Promise<string | null> {
+  const res = await fetch('/api/pick-airwall-table', { method: 'POST' });
+  const data = (await res.json()) as PickLocalPathResult;
+  if (!res.ok) throw new Error(data.error ?? '选择 AirWallTable.xml 失败');
+  return data.path;
+}
+
+async function pickAirWallBinDirPath(): Promise<string | null> {
+  const res = await fetch('/api/pick-airwall-bin-dir', { method: 'POST' });
+  const data = (await res.json()) as PickLocalPathResult;
+  if (!res.ok) throw new Error(data.error ?? '选择空气墙 bin 目录失败');
+  return data.path;
+}
+
+function isPickerAbort(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
+function supportsBrowserAirWallPickers(): boolean {
+  const fsWindow = window as BrowserFileSystemWindow;
+  return typeof fsWindow.showOpenFilePicker === 'function' && typeof fsWindow.showDirectoryPicker === 'function';
+}
+
+async function collectBinFilesFromDirectory(
+  dir: BrowserFileSystemDirectoryHandle,
+  prefix = '',
+): Promise<AirWallUploadFile[]> {
+  const files: AirWallUploadFile[] = [];
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind === 'file') {
+      if (!name.toLowerCase().endsWith('.bin')) continue;
+      files.push({
+        file: await handle.getFile(),
+        relativePath: `${prefix}${name}`,
+      });
+      continue;
+    }
+    files.push(...await collectBinFilesFromDirectory(handle, `${prefix}${name}/`));
+  }
+  return files;
+}
+
+async function pickAirWallTableSelection(): Promise<AirWallTableSelection | null> {
+  const fsWindow = window as BrowserFileSystemWindow;
+  const showOpenFilePicker = fsWindow.showOpenFilePicker;
+  if (supportsBrowserAirWallPickers() && showOpenFilePicker && !selectedAirWallBinDirPath) {
+    try {
+      const handles = await showOpenFilePicker.call(fsWindow, {
+        multiple: false,
+        types: [
+          {
+            description: 'AirWallTable.xml',
+            accept: {
+              'application/xml': ['.xml'],
+              'text/xml': ['.xml'],
+            },
+          },
+        ],
+      });
+      const handle = handles[0];
+      if (!handle) return null;
+      const file = await handle.getFile();
+      return { kind: 'upload', file, label: file.name };
+    } catch (err) {
+      if (isPickerAbort(err)) return null;
+      console.warn('showOpenFilePicker failed, falling back to local picker API', err);
+    }
+  }
+
+  const path = await pickAirWallTablePath();
+  return path ? { kind: 'path', path, label: fileDisplayName(path) } : null;
+}
+
+async function pickAirWallBinSelection(): Promise<AirWallBinSelection | null> {
+  const fsWindow = window as BrowserFileSystemWindow;
+  const showDirectoryPicker = fsWindow.showDirectoryPicker;
+  if (supportsBrowserAirWallPickers() && showDirectoryPicker && !selectedAirWallTablePath) {
+    try {
+      const dir = await showDirectoryPicker.call(fsWindow, { mode: 'read' });
+      const files = await collectBinFilesFromDirectory(dir);
+      if (!files.length) throw new Error('选择的目录里没有 bin 文件');
+      return { kind: 'upload', files, label: `${dir.name} · ${files.length} 个 bin` };
+    } catch (err) {
+      if (isPickerAbort(err)) return null;
+      if (err instanceof Error && err.message.includes('没有 bin 文件')) throw err;
+      console.warn('showDirectoryPicker failed, falling back to local picker API', err);
+    }
+  }
+
+  const path = await pickAirWallBinDirPath();
+  return path ? { kind: 'path', path, label: fileDisplayName(path) } : null;
+}
+
+async function loadCollisionScene(
+  mainUrl: string,
+  airWallRequest?: AirWallLoadRequest,
+): Promise<AirWallTableResult | null> {
+  const mainGltf = await loadGltfUrl(mainUrl);
+
+  let airWalls: AirWallTableResult | null = null;
+  const airWallGltfs: Array<{ gltf: GltfScene; row: AirWallRecord; collision: AirWallCollision }> = [];
+  if (airWallRequest) {
+    setLoading(true, '正在转换空气墙 collision.bin…');
+    airWalls =
+      airWallRequest.kind === 'path'
+        ? await loadAirWallTable(airWallRequest.tablePath, airWallRequest.binDir)
+        : await loadAirWallTableUpload(airWallRequest.tableFile, airWallRequest.binFiles);
+
+    for (const row of airWalls.airwalls) {
+      for (const collision of row.collisions) {
+        setLoading(true, `正在加载空气墙 #${row.id} ${collision.fileName}…`);
+        const gltf = await loadGltfUrl(collision.url);
+        airWallGltfs.push({ gltf, row, collision });
+      }
+    }
+  }
+
+  clearScene();
+  addGltfScene(mainGltf, { layer: 'map' });
+  loadedAirWallTable = airWalls;
+  for (const item of airWallGltfs) {
+    addGltfScene(item.gltf, { layer: 'airwall', airWall: item.row, collision: item.collision });
+  }
+
+  finalizeLoadedScene();
+  return airWalls;
+}
+
+async function openCollisionFromPath(filePath: string, airWallTablePath?: string, airWallBinDir?: string) {
   if (loading) return;
+  let shouldAutoLoadSelectedAirWalls = false;
   setLoading(true, '正在转换 collision.bin…');
   try {
     const result = await convertByPath(filePath);
-    showSource(result.source, result.cached);
     setLoading(true, '正在加载三维场景…');
-    await loadGltfUrl(result.url);
+    const request: AirWallLoadRequest | undefined = airWallTablePath
+      ? { kind: 'path', tablePath: airWallTablePath, binDir: airWallBinDir }
+      : undefined;
+    const airWalls = await loadCollisionScene(result.url, request);
+    currentMainCollision = result;
+    showSource(result.source, result.cached, airWalls);
+    shouldAutoLoadSelectedAirWalls = !request && hasCompleteAirWallSelection();
+    if (!shouldAutoLoadSelectedAirWalls) {
+      setAirWallInfo(airWalls ? `已加载 ${airWalls.airwalls.length} 个空气墙实例` : '—');
+    }
   } catch (err) {
     showError(err instanceof Error ? err.message : '加载失败');
   } finally {
     setLoading(false);
+    if (shouldAutoLoadSelectedAirWalls) tryAutoApplyAirWalls();
   }
 }
 
 async function openCollisionFromFile(file: File) {
   if (loading) return;
+  let shouldAutoLoadSelectedAirWalls = false;
   setLoading(true, `正在转换 ${file.name}…`);
   try {
     const result = await convertByUpload(file);
-    showSource(result.source, result.cached);
     setLoading(true, '正在加载三维场景…');
-    await loadGltfUrl(result.url);
+    await loadCollisionScene(result.url);
+    currentMainCollision = result;
+    showSource(result.source, result.cached, null);
+    shouldAutoLoadSelectedAirWalls = hasCompleteAirWallSelection();
+    if (!shouldAutoLoadSelectedAirWalls) setAirWallInfo('—');
   } catch (err) {
     showError(err instanceof Error ? err.message : '加载失败');
+  } finally {
+    setLoading(false);
+    if (shouldAutoLoadSelectedAirWalls) tryAutoApplyAirWalls();
+  }
+}
+
+function hasAnyAirWallSelection(): boolean {
+  return Boolean(selectedAirWallTablePath || selectedAirWallTableFile || selectedAirWallBinDirPath || selectedAirWallBinFiles.length);
+}
+
+function hasCompleteAirWallSelection(): boolean {
+  return Boolean(
+    (selectedAirWallTablePath && selectedAirWallBinDirPath) ||
+      (selectedAirWallTableFile && selectedAirWallBinFiles.length),
+  );
+}
+
+function selectedAirWallRequest(): AirWallLoadRequest | null {
+  if (selectedAirWallTablePath && selectedAirWallBinDirPath) {
+    return { kind: 'path', tablePath: selectedAirWallTablePath, binDir: selectedAirWallBinDirPath };
+  }
+  if (selectedAirWallTableFile && selectedAirWallBinFiles.length) {
+    return { kind: 'upload', tableFile: selectedAirWallTableFile, binFiles: selectedAirWallBinFiles };
+  }
+  return null;
+}
+
+function tryAutoApplyAirWalls() {
+  if (loading) return;
+
+  const hasTable = selectedAirWallTablePath !== null || selectedAirWallTableFile !== null;
+  const hasBinDir = selectedAirWallBinDirPath !== null || selectedAirWallBinFiles.length > 0;
+  if (!hasAnyAirWallSelection()) return;
+
+  if (hasTable && !hasBinDir) {
+    setAirWallInfo('已选择 AirWallTable.xml，请继续选择空气墙 bin 目录');
+    return;
+  }
+  if (!hasTable && hasBinDir) {
+    setAirWallInfo('已选择空气墙 bin 目录，请继续选择 AirWallTable.xml');
+    return;
+  }
+  if (!currentMainCollision) {
+    setAirWallInfo('空气墙数据已选齐，请先加载主地图 collision.bin');
+    return;
+  }
+
+  if (!hasCompleteAirWallSelection()) {
+    setAirWallInfo('请重新选择 AirWallTable.xml 与空气墙 bin 目录，保持两者来自同一种选择方式', true);
+    return;
+  }
+
+  void applyAirWallsFromSelection();
+}
+
+async function applyAirWallsFromSelection() {
+  if (loading) return;
+  if (!currentMainCollision) {
+    setAirWallInfo('请先加载主地图 collision.bin', true);
+    return;
+  }
+
+  const request = selectedAirWallRequest();
+  if (!selectedAirWallTablePath && !selectedAirWallTableFile) {
+    setAirWallInfo('请选择 AirWallTable.xml', true);
+    return;
+  }
+  if (!selectedAirWallBinDirPath && !selectedAirWallBinFiles.length) {
+    setAirWallInfo('请选择空气墙 bin 目录', true);
+    return;
+  }
+  if (!request) {
+    setAirWallInfo('请重新选择 AirWallTable.xml 与空气墙 bin 目录，保持两者来自同一种选择方式', true);
+    return;
+  }
+
+  setLoading(true, '正在加载空气墙配置…');
+  try {
+    const airWalls = await loadCollisionScene(currentMainCollision.url, request);
+    showSource(currentMainCollision.source, currentMainCollision.cached, airWalls);
+    const fileCount = airWalls?.airwalls.reduce((sum, row) => sum + row.collisions.length, 0) ?? 0;
+    setAirWallInfo(`已加载 ${airWalls?.airwalls.length ?? 0} 个实例 / ${fileCount} 个 collision bin`);
+  } catch (err) {
+    setAirWallInfo(err instanceof Error ? err.message : '空气墙加载失败', true);
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function clearAirWallsFromScene() {
+  if (loading) return;
+  if (!currentMainCollision) {
+    setAirWallInfo('请先加载主地图 collision.bin', true);
+    return;
+  }
+
+  setLoading(true, '正在清除空气墙…');
+  try {
+    await loadCollisionScene(currentMainCollision.url);
+    clearAirWallSelection();
+    showSource(currentMainCollision.source, currentMainCollision.cached, null);
+    setAirWallInfo('已清除空气墙');
+  } catch (err) {
+    setAirWallInfo(err instanceof Error ? err.message : '清除空气墙失败', true);
   } finally {
     setLoading(false);
   }
@@ -1114,8 +1882,16 @@ async function openCollisionFromFile(file: File) {
 async function tryLoadDefault() {
   const params = new URLSearchParams(window.location.search);
   const binParam = params.get('bin');
+  const airWallParam = params.get('airwall') ?? undefined;
+  const airWallBinDirParam = params.get('airwallbin') ?? undefined;
+  if (airWallParam) {
+    airWallTableSelectedEl.textContent = `${fileDisplayName(airWallParam)} · URL 参数`;
+  }
+  if (airWallBinDirParam) {
+    airWallBinSelectedEl.textContent = `${fileDisplayName(airWallBinDirParam)} · URL 参数`;
+  }
   if (binParam) {
-    await openCollisionFromPath(binParam);
+    await openCollisionFromPath(binParam, airWallParam, airWallBinDirParam);
     return;
   }
   showWelcome();
@@ -1126,6 +1902,50 @@ fileInput.addEventListener('change', () => {
   const f = fileInput.files?.[0];
   fileInput.value = '';
   if (f) void openCollisionFromFile(f);
+});
+
+airWallClearBtn.addEventListener('click', () => {
+  void clearAirWallsFromScene();
+});
+airWallTablePickBtn.addEventListener('click', () => {
+  if (loading) return;
+  setAirWallInfo('正在选择 AirWallTable.xml…');
+  void (async () => {
+    try {
+      const picked = await pickAirWallTableSelection();
+      if (!picked) {
+        setAirWallInfo('已取消选择 AirWallTable.xml');
+        return;
+      }
+      selectedAirWallTablePath = picked.kind === 'path' ? picked.path : null;
+      selectedAirWallTableFile = picked.kind === 'upload' ? picked.file : null;
+      selectedAirWallTableLabel = picked.label;
+      updateAirWallSelectionSummary();
+      tryAutoApplyAirWalls();
+    } catch (err) {
+      setAirWallInfo(err instanceof Error ? err.message : '选择 AirWallTable.xml 失败', true);
+    }
+  })();
+});
+airWallBinPickBtn.addEventListener('click', () => {
+  if (loading) return;
+  setAirWallInfo('正在选择空气墙 bin 目录…');
+  void (async () => {
+    try {
+      const picked = await pickAirWallBinSelection();
+      if (!picked) {
+        setAirWallInfo('已取消选择空气墙 bin 目录');
+        return;
+      }
+      selectedAirWallBinDirPath = picked.kind === 'path' ? picked.path : null;
+      selectedAirWallBinFiles = picked.kind === 'upload' ? picked.files : [];
+      selectedAirWallBinLabel = picked.label;
+      updateAirWallSelectionSummary();
+      tryAutoApplyAirWalls();
+    } catch (err) {
+      setAirWallInfo(err instanceof Error ? err.message : '选择空气墙 bin 目录失败', true);
+    }
+  })();
 });
 
 displayModeInputs.forEach((input) => {
@@ -1258,6 +2078,11 @@ if (import.meta.env.DEV) {
     getBoxMinY: () => computeStats().box.min.y,
     getOriginOffsetLen: () => sceneOrigin.offset.length(),
     getPanSpeed: () => controls.panSpeed,
+    getMeshCount: () => meshEntries.length,
+    getAirWallMeshCount: () => meshEntries.filter((entry) => entry.layer === 'airwall').length,
+    getAirWallAabbs: () => getAirWallDebugAabbs(),
+    getAirWallLabels: () => getAirWallDebugLabels(),
+    getAirWallVisualStates: () => getAirWallDebugVisualStates(),
     nudgeTarget: (dx: number) => {
       controls.target.x += dx;
       camera.position.x += dx;

@@ -1,5 +1,7 @@
 param(
     [string]$Bin = "",
+    [string]$AirWall = "",
+    [string]$AirWallBinDir = "",
     [switch]$Pick,
     [switch]$NoBrowser
 )
@@ -73,6 +75,22 @@ if ($Pick) {
 if ($InputPath -ne "") {
     $UrlBin = [uri]::EscapeDataString((Resolve-Path $InputPath).Path)
     $Url = "http://127.0.0.1:$Port/?bin=$UrlBin"
+    if (-not [string]::IsNullOrWhiteSpace($AirWall)) {
+        if (-not (Test-Path $AirWall)) {
+            throw "AirWallTable not found: $AirWall"
+        }
+        $UrlAirWall = [uri]::EscapeDataString((Resolve-Path $AirWall).Path)
+        $Url = "$Url&airwall=$UrlAirWall"
+        if (-not [string]::IsNullOrWhiteSpace($AirWallBinDir)) {
+            if (-not (Test-Path $AirWallBinDir)) {
+                throw "AirWall bin directory not found: $AirWallBinDir"
+            }
+            $UrlAirWallBin = [uri]::EscapeDataString((Resolve-Path $AirWallBinDir).Path)
+            $Url = "$Url&airwallbin=$UrlAirWallBin"
+        }
+    }
+} elseif (-not [string]::IsNullOrWhiteSpace($AirWall)) {
+    Write-Host "[2/4] AirWall parameter ignored because no -Bin was provided" -ForegroundColor Yellow
 }
 
 Push-Location $Viewer
@@ -108,6 +126,12 @@ try {
     Write-Host "[4/4] Ready" -ForegroundColor Green
     if ($InputPath -ne "") {
         Write-Host "  Source : $InputPath"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AirWall)) {
+        Write-Host "  AirWall: $AirWall"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AirWallBinDir)) {
+        Write-Host "  AirWall bin dir: $AirWallBinDir"
     }
     Write-Host "  Viewer : $Url"
     Write-Host "  Note   : load map / set guide & pivot in the browser UI"

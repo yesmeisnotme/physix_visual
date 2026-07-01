@@ -154,6 +154,10 @@ body,
   font-size: 11px;
 }
 
+.airwall-source-title {
+  margin-top: 8px;
+}
+
 .error {
   color: #fca5a5;
   line-height: 1.5;
@@ -274,6 +278,33 @@ body,
 .field input:focus {
   outline: none;
   border-color: #3b82f6;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.panel .picker-row button {
+  width: 108px;
+  flex: 0 0 auto;
+}
+
+.selected-file {
+  min-width: 0;
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.24);
+  color: #d7dce2;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .check-row {
